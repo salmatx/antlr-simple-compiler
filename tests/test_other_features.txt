@@ -1,0 +1,29 @@
+// Test new grammar features
+int a, b;
+string s1, s2;
+
+a = 17;
+b = 3;
+
+// Test modulo operator
+write "17 % 3 = ", a % b;
+
+// Test string concatenation
+s1 = "Hello";
+s2 = "World";
+write s1 . " " . s2;
+
+// Test ternary operator
+write "Max: ", (a > b) ? a : b;
+
+// Test do-while loop
+a = 0;
+do {
+    write "do-while: ", a;
+    a = a + 1;
+} while (a < 3);
+
+// Test for loop
+for (a = 0; a < 3; a = a + 1) {
+    write "for loop: ", a;
+}
