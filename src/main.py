@@ -19,13 +19,17 @@ def main():
     tree = grammar_parser.program()
     visitor = Visitor()
     visitor.visit(tree)
+    
+    if visitor.errors:
+        for err in visitor.errors:
+            print(err)
+    else:
+        for instr in visitor.instructions:
+            print(instr)
 
-    for instr in visitor.instructions:
-        print(instr)
-
-    print("\n--- Running interpreter ---")
-    interpreter = Interpreter(visitor.instructions)
-    interpreter.run()
+        print("\n--- Running interpreter ---")
+        interpreter = Interpreter(visitor.instructions)
+        interpreter.run()
 
 if __name__ == "__main__":
     main()

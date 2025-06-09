@@ -8,6 +8,11 @@ class Visitor(pjp_grammarVisitor):
         self.variables = set()
         self.var_types = {}
         self.label_counter = 0
+        self.errors = []
+        
+    def error(self, message, ctx):
+        line = ctx.start.line
+        self.errors.append(f"[Line {line}] Semantic error: {message}")
 
     def get_next_label(self):
         label = self.label_counter
@@ -27,6 +32,9 @@ class Visitor(pjp_grammarVisitor):
         var_list = [var.getText() for var in ctx.VAR()]
 
         for var in var_list:
+            if var in self.variables:
+                self.error(f"Variable '{var}' already declared", ctx)
+                return None
             self.variables.add(var)
             self.var_types[var] = type_name
 
@@ -43,14 +51,19 @@ class Visitor(pjp_grammarVisitor):
         return None
 
     def visitExprStmt(self, ctx: pjp_grammarParser.ExprStmtContext):
-        self.visit(ctx.expression())
-        self.instructions.append('pop')
+        result = self.visit(ctx.expression())
+        if result is not None:
+            self.instructions.append('pop')
         return None
 
     def visitReadStmt(self, ctx: pjp_grammarParser.ReadStmtContext):
         var_names = [var.getText() for var in ctx.VAR()]
         
         for var in var_names:
+            if var not in self.var_types:
+                self.error(f"Cannot read into undeclared variable '{var}'", ctx)
+                continue
+                
             typ = self.var_types.get(var, 'int')
             read_instr = {
                 'int': 'read I',
@@ -64,16 +77,33 @@ class Visitor(pjp_grammarVisitor):
 
     def visitWriteStmt(self, ctx: pjp_grammarParser.WriteStmtContext):
         exprs = ctx.expression()
+        valid_exprs = 0
+        
         for expr in exprs:
-            self.visit(expr)
-        self.instructions.append(f'print {len(exprs)}')
+            result = self.visit(expr)
+            if result is not None:
+                valid_exprs += 1
+        
+        if valid_exprs > 0:
+            self.instructions.append(f'print {valid_exprs}')
         return None
 
     def visitAssignExpr(self, ctx: pjp_grammarParser.AssignExprContext):
         var_name = ctx.VAR().getText()
-        expr_type = self.visit(ctx.expression())
         
-        var_type = self.var_types.get(var_name, 'int')
+        var_type = self.var_types.get(var_name)
+        if var_type is None:
+            self.error(f"Assignment to undeclared variable '{var_name}'", ctx)
+            return None
+        
+        expr_type = self.visit(ctx.expression())
+        if expr_type is None:
+            return None
+        
+        if var_type == 'int' and expr_type == 'float':
+            self.error(f"Cannot assign float to int variable '{var_name}'", ctx)
+            return None
+        
         if var_type == 'float' and expr_type == 'int':
             self.instructions.append('itof')
         
@@ -111,6 +141,9 @@ class Visitor(pjp_grammarVisitor):
         left_type = self.visit(ctx.expression(0))
         right_type = self.visit(ctx.expression(1))
         
+        if left_type is None or right_type is None:
+            return 'bool'  # Return bool even on error to continue execution
+        
         # Handle type promotion for comparisons
         if left_type == 'int' and right_type == 'float':
             # Need to convert the left operand (second on stack)
@@ -142,6 +175,9 @@ class Visitor(pjp_grammarVisitor):
         left_type = self.visit(ctx.expression(0))
         right_type = self.visit(ctx.expression(1))
         
+        if left_type is None or right_type is None:
+            return 'bool'  # Return bool even on error to continue execution
+        
         # Handle type promotion for relational comparisons
         if left_type == 'int' and right_type == 'float':
             self.instructions.insert(-1, 'itof')
@@ -153,33 +189,85 @@ class Visitor(pjp_grammarVisitor):
             result_type = 'F'
         else:
             result_type = 'I'
-        
+    
         op = ctx.op.text
         self.instructions.append(f'lt {result_type}' if op == '<' else f'gt {result_type}')
         return 'bool'
 
     def visitAddExpr(self, ctx: pjp_grammarParser.AddExprContext):
         op = ctx.op.text
-        result_type = self._visitAndPromote(ctx.expression(0), ctx.expression(1))
+        left_type = self.visit(ctx.expression(0))
+        right_type = self.visit(ctx.expression(1))
+        
+        if left_type is None or right_type is None:
+            return None
+        
+        if left_type == 'string' or right_type == 'string':
+            self.error("Addition operator (+/-) cannot be used with strings", ctx)
+            return None
+        
+        if left_type == 'int' and right_type == 'float':
+            self.instructions.insert(-1, 'itof')
+            result_type = 'float'
+        elif left_type == 'float' and right_type == 'int':
+            self.instructions.append('itof')
+            result_type = 'float'
+        elif left_type == right_type:
+            result_type = left_type
+        else:
+            result_type = 'int'
+    
         self.instructions.append(f'add {"F" if result_type == "float" else "I"}' if op == '+' else f'sub {"F" if result_type == "float" else "I"}')
         return result_type
 
     def visitMulExpr(self, ctx: pjp_grammarParser.MulExprContext):
         op = ctx.op.text
-        result_type = self._visitAndPromote(ctx.expression(0), ctx.expression(1))
-        if op == '*':
+        left_type = self.visit(ctx.expression(0))
+        right_type = self.visit(ctx.expression(1))
+        
+        if left_type is None or right_type is None:
+            return None
+        
+        # For division, handle integer division vs float division
+        if op == '/':
+            if left_type == 'int' and right_type == 'int':
+                # Integer division - result is int
+                self.instructions.append('div I')
+                return 'int'
+            else:
+                # At least one operand is float - promote and return float
+                if left_type == 'int':
+                    self.instructions.insert(-1, 'itof')
+                elif right_type == 'int':
+                    self.instructions.append('itof')
+                self.instructions.append('div F')
+                return 'float'
+        else:  # Multiplication
+            if left_type == 'int' and right_type == 'float':
+                self.instructions.insert(-1, 'itof')
+                result_type = 'float'
+            elif left_type == 'float' and right_type == 'int':
+                self.instructions.append('itof')
+                result_type = 'float'
+            elif left_type == right_type:
+                result_type = left_type
+            else:
+                result_type = 'int'
+            
             self.instructions.append(f'mul {"F" if result_type == "float" else "I"}')
-        elif op == '/':
-            self.instructions.append(f'div {"F" if result_type == "float" else "I"}')
-        return result_type
+            return result_type
 
     def visitNotExpr(self, ctx: pjp_grammarParser.NotExprContext):
-        self.visit(ctx.expression())
+        expr_type = self.visit(ctx.expression())
+        if expr_type is None:
+            return 'bool'  # Return bool even on error
         self.instructions.append('not')
         return 'bool'
 
     def visitNegExpr(self, ctx: pjp_grammarParser.NegExprContext):
         typ = self.visit(ctx.expression())
+        if typ is None:
+            return 'int'
         self.instructions.append(f'uminus {"F" if typ == "float" else "I"}')
         return typ
 
@@ -204,8 +292,11 @@ class Visitor(pjp_grammarVisitor):
 
     def visitVarExpr(self, ctx: pjp_grammarParser.VarExprContext):
         var_name = ctx.VAR().getText()
+        if var_name not in self.var_types:
+            self.error(f"Use of undeclared variable '{var_name}'", ctx)
+            return None
         self.instructions.append(f'load {var_name}')
-        return self.var_types.get(var_name, 'int')
+        return self.var_types.get(var_name)
 
     def visitBlockStmt(self, ctx: pjp_grammarParser.BlockStmtContext):
         for stmt in ctx.statement():
@@ -252,19 +343,42 @@ class Visitor(pjp_grammarVisitor):
         return None
     
     def visitMuduloExpr(self, ctx: pjp_grammarParser.MuduloExprContext):
-        result_type = self._visitAndPromote(ctx.expression(0), ctx.expression(1))
-        self.instructions.append('mod')
-        return result_type
+        left_type = self.visit(ctx.expression(0))
+        right_type = self.visit(ctx.expression(1))
+        
+        if left_type is None or right_type is None:
+            return None
+        
+        if left_type == 'float' or right_type == 'float':
+            self.error("Modulo operator (%) cannot be used with floats", ctx)
+            return None
+        
+        if left_type == 'int' and right_type == 'int':
+            self.instructions.append('mod')
+            return 'int'
+        else:
+            self.error("Modulo operator (%) can be used with only with int", ctx)
+            return None
     
     def visitConcatExpr(self, ctx: pjp_grammarParser.ConcatExprContext):
-        self.visit(ctx.expression(0))
-        self.visit(ctx.expression(1))
+        left_type = self.visit(ctx.expression(0))
+        right_type = self.visit(ctx.expression(1))
+        
+        if left_type is None or right_type is None:
+            return None
+    
+        if left_type != 'string' or right_type != 'string':
+            self.error("Concatenation operator (.) requires both operands to be strings", ctx)
+            return None
+        
         self.instructions.append('concat')
         return 'string'
-    
+        
     def visitTernaryExpr(self, ctx: pjp_grammarParser.TernaryExprContext):
         # condition ? true_expr : false_expr
-        self.visit(ctx.expression(0))  # condition
+        cond_type = self.visit(ctx.expression(0))  # condition
+        if cond_type is None:
+            return 'int'  # Default fallback
         
         else_label = self.get_next_label()
         end_label = self.get_next_label()
@@ -273,11 +387,15 @@ class Visitor(pjp_grammarVisitor):
         
         # True expression
         true_type = self.visit(ctx.expression(1))
+        if true_type is None:
+            true_type = 'int'  # Default fallback
         self.instructions.append(f'jmp {end_label}')
         
         # False expression
         self.instructions.append(f'label {else_label}')
         false_type = self.visit(ctx.expression(2))
+        if false_type is None:
+            false_type = 'int'  # Default fallback
         
         self.instructions.append(f'label {end_label}')
         
